@@ -1,5 +1,0 @@
-Metadata-Version: 2.4
-Name: shopflow-constants
-Version: 0.1.0
-Summary: Shared constants (RBAC roles/permissions, enums) for ShopFlow services
-Requires-Python: >=3.11

@@ -1,8 +1,0 @@
-pyproject.toml
-shopflow_configuration/__init__.py
-shopflow_configuration/base.py
-shopflow_configuration.egg-info/PKG-INFO
-shopflow_configuration.egg-info/SOURCES.txt
-shopflow_configuration.egg-info/dependency_links.txt
-shopflow_configuration.egg-info/requires.txt
-shopflow_configuration.egg-info/top_level.txt

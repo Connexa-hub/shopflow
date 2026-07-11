@@ -31,6 +31,18 @@ dev = [
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+# auth-service ships an `app/` package alongside an `alembic/` migrations
+# directory and a `tests/` directory at the project root. Without an
+# explicit include/exclude, setuptools' flat-layout auto-discovery treats
+# every top-level directory as a candidate package, which fails with:
+#   "Multiple top-level packages discovered in a flat-layout: ['app', 'alembic']"
+# Restricting discovery to `app*` fixes this — alembic and tests are not
+# installable packages, they're run in place (alembic via `alembic upgrade`,
+# tests via `pytest`), so they should never be part of the wheel/egg-link.
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["alembic*", "tests*"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
