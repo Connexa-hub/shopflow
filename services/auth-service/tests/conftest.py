@@ -1,7 +1,6 @@
 import os
 import uuid
 
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -20,7 +19,6 @@ from app.repositories.token_repository import TokenRepository  # noqa: E402
 from app.repositories.user_repository import UserRepository  # noqa: E402
 from app.services.auth_service import AuthService  # noqa: E402
 from app.core.config import get_settings  # noqa: E402
-from app.core import dependencies  # noqa: E402
 
 
 @pytest_asyncio.fixture
