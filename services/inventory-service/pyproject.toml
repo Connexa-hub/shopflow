@@ -1,7 +1,7 @@
 [project]
-name = "shopflow-auth-service"
+name = "shopflow-inventory-service"
 version = "0.1.0"
-description = "ShopFlow authentication & RBAC service"
+description = "ShopFlow inventory, stock ledger, and catalog service"
 requires-python = ">=3.11"
 dependencies = [
     "shopflow-database",
@@ -15,8 +15,6 @@ dependencies = [
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
     "python-jose[cryptography]>=3.3",
-    "passlib[bcrypt]>=1.7",
-    "redis>=5.0",
     "structlog>=24.1",
 ]
 
@@ -34,14 +32,10 @@ dev = [
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
-# auth-service ships an `app/` package alongside an `alembic/` migrations
-# directory and a `tests/` directory at the project root. Without an
-# explicit include/exclude, setuptools' flat-layout auto-discovery treats
-# every top-level directory as a candidate package, which fails with:
-#   "Multiple top-level packages discovered in a flat-layout: ['app', 'alembic']"
-# Restricting discovery to `app*` fixes this — alembic and tests are not
-# installable packages, they're run in place (alembic via `alembic upgrade`,
-# tests via `pytest`), so they should never be part of the wheel/egg-link.
+# Same fix as auth-service: without this, setuptools' flat-layout
+# discovery sees both `app/` and `alembic/` as top-level package
+# candidates and refuses to install. See auth-service/pyproject.toml
+# for the full explanation.
 [tool.setuptools.packages.find]
 include = ["app*"]
 exclude = ["alembic*", "tests*"]

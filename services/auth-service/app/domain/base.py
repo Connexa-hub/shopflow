@@ -1,28 +1,17 @@
-"""Declarative base and shared mixins for auth-service models."""
-import uuid
-from datetime import datetime, timezone
+"""
+Declarative base and shared mixins for auth-service models.
 
-from sqlalchemy import DateTime
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+These are re-exported from the shared `shopflow_database` package (see
+packages/database) rather than defined here — this used to be a local
+definition duplicated per-service; Phase 2 extracted it to one place so a
+fix or new mixin (e.g. SoftDeleteMixin) doesn't need to be copy-pasted into
+every future service. `Base` itself is created fresh via `create_base()`
+so auth-service's MetaData/migration history stays fully isolated from
+every other service's, per shopflow_database's design (see its base.py
+docstring for why a shared Base instance would be wrong).
+"""
+from shopflow_database import TimestampMixin, UUIDPrimaryKeyMixin, create_base
 
+Base = create_base()
 
-class Base(DeclarativeBase):
-    pass
-
-
-class UUIDPrimaryKeyMixin:
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-
-
-class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
-    )
+__all__ = ["Base", "TimestampMixin", "UUIDPrimaryKeyMixin"]

@@ -1,15 +1,15 @@
-name: auth-service CI
+name: inventory-service CI
 
 on:
   push:
     paths:
-      - "services/auth-service/**"
+      - "services/inventory-service/**"
       - "packages/configuration/**"
       - "packages/constants/**"
       - "packages/database/**"
   pull_request:
     paths:
-      - "services/auth-service/**"
+      - "services/inventory-service/**"
       - "packages/configuration/**"
       - "packages/constants/**"
       - "packages/database/**"
@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: services/auth-service
+        working-directory: services/inventory-service
     steps:
       - uses: actions/checkout@v4
 
@@ -44,7 +44,7 @@ jobs:
 
       - name: Run tests
         env:
-          SERVICE_NAME: auth-service
+          SERVICE_NAME: inventory-service
           ENVIRONMENT: test
           DATABASE_URL: "sqlite+aiosqlite:///:memory:"
           REDIS_URL: "redis://localhost:6379/0"

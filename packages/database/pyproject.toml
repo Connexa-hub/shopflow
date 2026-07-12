@@ -1,0 +1,24 @@
+[project]
+name = "shopflow-database"
+version = "0.1.0"
+description = "Shared SQLAlchemy base, mixins, and multi-tenancy primitives for ShopFlow services"
+requires-python = ">=3.11"
+dependencies = [
+    "sqlalchemy>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "aiosqlite>=0.20",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["shopflow_database*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

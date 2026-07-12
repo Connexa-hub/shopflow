@@ -1,0 +1,15 @@
+-- Runs once, on first container init, via Postgres's own
+-- /docker-entrypoint-initdb.d convention (docker-compose mounts this
+-- directory automatically — see docker-compose.yml).
+--
+-- One Postgres CONTAINER for local dev (cheap, simple), but every service
+-- still gets its OWN database, never a shared schema — this is what the
+-- README's "no service reaches into another service's database" rule
+-- actually requires. In staging/production, each of these would typically
+-- become its own managed Postgres instance (e.g. separate Supabase
+-- projects); the per-service DATABASE_URL env var is what makes that
+-- swap a config change, not a code change.
+--
+-- POSTGRES_DB (set via docker-compose environment) creates the first
+-- database automatically; this script creates the rest.
+CREATE DATABASE shopflow_inventory;
