@@ -39,4 +39,4 @@ async def list_locations(
     _principal: CanReadInventory,
 ) -> list[LocationResponse]:
     locations = await location_service.list_locations(business_id=business_id)
-    return [LocationResponse.model_validate(l) for l in locations]
+    return [LocationResponse.model_validate(location) for location in locations]
