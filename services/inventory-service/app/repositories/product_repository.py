@@ -52,6 +52,23 @@ class ProductRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_by_ids(
+        self, *, business_id: uuid.UUID, product_ids: list[uuid.UUID]
+    ) -> list[Product]:
+        """Returns only products that exist AND belong to business_id —
+        any IDs that don't match (wrong tenant, or don't exist) are
+        silently omitted rather than raising, same tenant-isolation
+        posture as every other lookup in this repository: the caller
+        (ProductService) decides whether a missing ID is an error."""
+        if not product_ids:
+            return []
+        result = await self._session.execute(
+            select(Product).where(
+                Product.business_id == business_id, Product.id.in_(product_ids)
+            )
+        )
+        return list(result.scalars().all())
+
     async def create(self, product: Product) -> Product:
         self._session.add(product)
         await self._session.flush()

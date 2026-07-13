@@ -32,6 +32,10 @@ class UpdateProductRequest(BaseModel):
     is_active: bool | None = None
 
 
+class BatchProductLookupRequest(BaseModel):
+    product_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=200)
+
+
 class ProductResponse(BaseModel):
     id: uuid.UUID
     business_id: uuid.UUID

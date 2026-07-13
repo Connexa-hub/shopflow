@@ -8,21 +8,29 @@ from app.core.dependencies import StockServiceDep
 from app.core.security import BusinessContext, Principal, require_permission
 from app.schemas.stock import (
     AdjustmentRequest,
+    BatchReturnRequest,
+    BatchSaleRequest,
     LowStockItemResponse,
     RestockRequest,
+    ReturnRequest,
     SaleRequest,
     StockLevelResponse,
     StockMovementResponse,
     TransferRequest,
     WasteRequest,
 )
-from app.services.stock_service import InsufficientStockError, InvalidStockReferenceError
+from app.services.stock_service import (
+    BatchStockItem,
+    InsufficientStockError,
+    InvalidStockReferenceError,
+)
 
 router = APIRouter(prefix="/api/v1/stock", tags=["stock"])
 
 CanReadInventory = Annotated[Principal, Depends(require_permission(Permission.INVENTORY_READ))]
 CanWriteInventory = Annotated[Principal, Depends(require_permission(Permission.INVENTORY_WRITE))]
 CanCreateSale = Annotated[Principal, Depends(require_permission(Permission.SALES_CREATE))]
+CanRefundSale = Annotated[Principal, Depends(require_permission(Permission.SALES_REFUND))]
 
 
 @router.post("/restock", response_model=StockMovementResponse, status_code=status.HTTP_201_CREATED)
@@ -144,6 +152,101 @@ async def transfer_stock(
         StockMovementResponse.model_validate(out_movement),
         StockMovementResponse.model_validate(in_movement),
     ]
+
+
+@router.post("/return", response_model=StockMovementResponse, status_code=status.HTTP_201_CREATED)
+async def record_return(
+    body: ReturnRequest,
+    business_id: BusinessContext,
+    stock_service: StockServiceDep,
+    principal: CanRefundSale,
+) -> StockMovementResponse:
+    # Gated by SALES_REFUND, not SALES_CREATE or INVENTORY_WRITE — voiding
+    # a sale (and putting its stock back) requires the same authority as
+    # issuing a refund. Cashiers can ring up sales but not undo them; see
+    # shopflow_constants.DEFAULT_ROLE_PERMISSIONS.
+    try:
+        movement = await stock_service.record_return(
+            business_id=business_id,
+            product_id=body.product_id,
+            location_id=body.location_id,
+            quantity=body.quantity,
+            reference_id=body.reference_id,
+            reason=body.reason,
+            created_by=principal.user_id,
+        )
+    except InvalidStockReferenceError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return StockMovementResponse.model_validate(movement)
+
+
+@router.post(
+    "/batch-sale", response_model=list[StockMovementResponse], status_code=status.HTTP_201_CREATED
+)
+async def batch_sale(
+    body: BatchSaleRequest,
+    business_id: BusinessContext,
+    stock_service: StockServiceDep,
+    principal: CanCreateSale,
+) -> list[StockMovementResponse]:
+    """Atomically deducts stock for every line item in a checkout — see
+    StockService.record_batch_sale for the atomicity guarantee. This is
+    what sales-service calls when completing a multi-item sale, forwarding
+    the cashier's own bearer token (same cross-service pattern as the
+    single-item /sale endpoint, just batched)."""
+    try:
+        movements = await stock_service.record_batch_sale(
+            business_id=business_id,
+            items=[
+                BatchStockItem(
+                    product_id=item.product_id,
+                    location_id=item.location_id,
+                    quantity=item.quantity,
+                )
+                for item in body.items
+            ],
+            reference_id=body.reference_id,
+            created_by=principal.user_id,
+        )
+    except InsufficientStockError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except InvalidStockReferenceError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return [StockMovementResponse.model_validate(m) for m in movements]
+
+
+@router.post(
+    "/batch-return",
+    response_model=list[StockMovementResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def batch_return(
+    body: BatchReturnRequest,
+    business_id: BusinessContext,
+    stock_service: StockServiceDep,
+    principal: CanRefundSale,
+) -> list[StockMovementResponse]:
+    """The reverse of batch_sale — used to atomically restore stock for
+    every line item when voiding a multi-item sale. Same SALES_REFUND gate
+    as the single-item /return endpoint."""
+    try:
+        movements = await stock_service.record_batch_return(
+            business_id=business_id,
+            items=[
+                BatchStockItem(
+                    product_id=item.product_id,
+                    location_id=item.location_id,
+                    quantity=item.quantity,
+                )
+                for item in body.items
+            ],
+            reference_id=body.reference_id,
+            reason=body.reason,
+            created_by=principal.user_id,
+        )
+    except InvalidStockReferenceError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return [StockMovementResponse.model_validate(m) for m in movements]
 
 
 @router.get("/level", response_model=StockLevelResponse)

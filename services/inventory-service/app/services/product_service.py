@@ -123,6 +123,17 @@ class ProductService:
             raise ProductNotFoundError(f"No product with barcode '{barcode}'")
         return product
 
+    async def get_products_by_ids(
+        self, *, business_id: uuid.UUID, product_ids: list[uuid.UUID]
+    ) -> list[Product]:
+        """Batch lookup for cross-service callers (sales-service builds a
+        checkout from several product_ids and needs current authoritative
+        prices/names in one round trip rather than N sequential calls).
+        Silently omits IDs that don't exist or belong to another business —
+        the caller must check the returned count/IDs against what it asked
+        for if it needs to detect missing items."""
+        return await self._products.get_by_ids(business_id=business_id, product_ids=product_ids)
+
     async def list_products(
         self,
         *,

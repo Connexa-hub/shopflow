@@ -8,6 +8,7 @@ from app.repositories.location_repository import LocationRepository
 from app.repositories.product_repository import ProductRepository
 from app.repositories.stock_repository import StockRepository
 from app.services.stock_service import (
+    BatchStockItem,
     InsufficientStockError,
     InvalidStockReferenceError,
     StockService,
@@ -365,3 +366,184 @@ class TestTenantIsolation:
                 location_id=created.id,  # ...but NOT for this location
                 quantity=Decimal("10"),
             )
+
+
+class TestReturn:
+    async def test_return_increases_quantity(self, stock_service, business_id, product, location):
+        await stock_service.record_restock(
+            business_id=business_id, product_id=product.id, location_id=location.id, quantity=Decimal("10")
+        )
+        await stock_service.record_sale(
+            business_id=business_id, product_id=product.id, location_id=location.id, quantity=Decimal("3")
+        )
+        movement = await stock_service.record_return(
+            business_id=business_id,
+            product_id=product.id,
+            location_id=location.id,
+            quantity=Decimal("3"),
+            reason="Customer changed their mind",
+        )
+        assert movement.movement_type == MovementType.RETURN.value
+        assert movement.quantity_delta == Decimal("3")
+        assert movement.resulting_quantity == Decimal("10")
+
+    async def test_return_rejects_non_positive_quantity(
+        self, stock_service, business_id, product, location
+    ):
+        with pytest.raises(ValueError):
+            await stock_service.record_return(
+                business_id=business_id,
+                product_id=product.id,
+                location_id=location.id,
+                quantity=Decimal("0"),
+            )
+
+
+class TestBatchSale:
+    async def test_batch_sale_deducts_all_items_atomically(
+        self, stock_service, db_session, business_id, location
+    ):
+        repo = ProductRepository(db_session)
+        product_a = await repo.create(
+            Product(business_id=business_id, sku="A", name="A", unit_price=Decimal("1"))
+        )
+        product_b = await repo.create(
+            Product(business_id=business_id, sku="B", name="B", unit_price=Decimal("1"))
+        )
+        await repo.commit()
+
+        await stock_service.record_restock(
+            business_id=business_id, product_id=product_a.id, location_id=location.id, quantity=Decimal("10")
+        )
+        await stock_service.record_restock(
+            business_id=business_id, product_id=product_b.id, location_id=location.id, quantity=Decimal("10")
+        )
+
+        movements = await stock_service.record_batch_sale(
+            business_id=business_id,
+            items=[
+                BatchStockItem(product_id=product_a.id, location_id=location.id, quantity=Decimal("4")),
+                BatchStockItem(product_id=product_b.id, location_id=location.id, quantity=Decimal("6")),
+            ],
+        )
+        assert len(movements) == 2
+        assert await stock_service.get_current_quantity(
+            business_id=business_id, product_id=product_a.id, location_id=location.id
+        ) == Decimal("6")
+        assert await stock_service.get_current_quantity(
+            business_id=business_id, product_id=product_b.id, location_id=location.id
+        ) == Decimal("4")
+
+        # Both movements share one reference_id, correlating them as one checkout.
+        assert movements[0].reference_id == movements[1].reference_id
+
+    async def test_batch_sale_is_all_or_nothing(
+        self, stock_service, db_session, business_id, location
+    ):
+        """The core atomicity property: if item 2 of 2 has insufficient
+        stock, item 1's deduction must NOT be left applied."""
+        repo = ProductRepository(db_session)
+        product_a = await repo.create(
+            Product(business_id=business_id, sku="A2", name="A2", unit_price=Decimal("1"))
+        )
+        product_b = await repo.create(
+            Product(business_id=business_id, sku="B2", name="B2", unit_price=Decimal("1"))
+        )
+        await repo.commit()
+
+        await stock_service.record_restock(
+            business_id=business_id, product_id=product_a.id, location_id=location.id, quantity=Decimal("10")
+        )
+        # product_b has ZERO stock — this item will fail the insufficient-stock check.
+
+        with pytest.raises(InsufficientStockError):
+            await stock_service.record_batch_sale(
+                business_id=business_id,
+                items=[
+                    BatchStockItem(product_id=product_a.id, location_id=location.id, quantity=Decimal("4")),
+                    BatchStockItem(product_id=product_b.id, location_id=location.id, quantity=Decimal("1")),
+                ],
+            )
+
+        # product_a's stock must be UNCHANGED — nothing commits until the
+        # whole batch succeeds.
+        assert await stock_service.get_current_quantity(
+            business_id=business_id, product_id=product_a.id, location_id=location.id
+        ) == Decimal("10")
+
+    async def test_batch_sale_rejects_empty_items(self, stock_service, business_id):
+        with pytest.raises(ValueError):
+            await stock_service.record_batch_sale(business_id=business_id, items=[])
+
+
+class TestBatchReturn:
+    async def test_batch_return_restores_all_items(
+        self, stock_service, db_session, business_id, location
+    ):
+        repo = ProductRepository(db_session)
+        product_a = await repo.create(
+            Product(business_id=business_id, sku="RA", name="RA", unit_price=Decimal("1"))
+        )
+        product_b = await repo.create(
+            Product(business_id=business_id, sku="RB", name="RB", unit_price=Decimal("1"))
+        )
+        await repo.commit()
+
+        await stock_service.record_restock(
+            business_id=business_id, product_id=product_a.id, location_id=location.id, quantity=Decimal("10")
+        )
+        await stock_service.record_restock(
+            business_id=business_id, product_id=product_b.id, location_id=location.id, quantity=Decimal("10")
+        )
+        await stock_service.record_batch_sale(
+            business_id=business_id,
+            items=[
+                BatchStockItem(product_id=product_a.id, location_id=location.id, quantity=Decimal("4")),
+                BatchStockItem(product_id=product_b.id, location_id=location.id, quantity=Decimal("6")),
+            ],
+        )
+
+        await stock_service.record_batch_return(
+            business_id=business_id,
+            items=[
+                BatchStockItem(product_id=product_a.id, location_id=location.id, quantity=Decimal("4")),
+                BatchStockItem(product_id=product_b.id, location_id=location.id, quantity=Decimal("6")),
+            ],
+            reason="Sale voided",
+        )
+
+        assert await stock_service.get_current_quantity(
+            business_id=business_id, product_id=product_a.id, location_id=location.id
+        ) == Decimal("10")
+        assert await stock_service.get_current_quantity(
+            business_id=business_id, product_id=product_b.id, location_id=location.id
+        ) == Decimal("10")
+
+
+class TestTransferAtomicity:
+    async def test_transfer_commits_both_legs_together(
+        self, stock_service, business_id, product, location, second_location
+    ):
+        """Regression test for a bug found on review: the original
+        transfer() called record_movement (which commits) for each leg
+        independently, so a failure on the second leg could leave the
+        first already committed with no matching credit at the
+        destination. Now both legs share one commit."""
+        await stock_service.record_restock(
+            business_id=business_id, product_id=product.id, location_id=location.id, quantity=Decimal("20")
+        )
+        out_movement, in_movement = await stock_service.transfer(
+            business_id=business_id,
+            product_id=product.id,
+            from_location_id=location.id,
+            to_location_id=second_location.id,
+            quantity=Decimal("5"),
+        )
+        # Both movements exist and are correctly linked post-commit.
+        assert out_movement.reference_id == in_movement.reference_id
+        assert await stock_service.get_current_quantity(
+            business_id=business_id, product_id=product.id, location_id=location.id
+        ) == Decimal("15")
+        assert await stock_service.get_current_quantity(
+            business_id=business_id, product_id=product.id, location_id=second_location.id
+        ) == Decimal("5")

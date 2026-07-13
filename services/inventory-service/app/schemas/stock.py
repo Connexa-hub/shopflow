@@ -42,6 +42,31 @@ class TransferRequest(BaseModel):
     quantity: Decimal = Field(..., gt=0)
 
 
+class ReturnRequest(BaseModel):
+    product_id: uuid.UUID
+    location_id: uuid.UUID
+    quantity: Decimal = Field(..., gt=0)
+    reference_id: uuid.UUID | None = None
+    reason: str | None = None
+
+
+class BatchStockItemRequest(BaseModel):
+    product_id: uuid.UUID
+    location_id: uuid.UUID
+    quantity: Decimal = Field(..., gt=0)
+
+
+class BatchSaleRequest(BaseModel):
+    items: list[BatchStockItemRequest] = Field(..., min_length=1, max_length=200)
+    reference_id: uuid.UUID | None = None
+
+
+class BatchReturnRequest(BaseModel):
+    items: list[BatchStockItemRequest] = Field(..., min_length=1, max_length=200)
+    reference_id: uuid.UUID | None = None
+    reason: str | None = None
+
+
 class StockMovementResponse(BaseModel):
     id: uuid.UUID
     product_id: uuid.UUID

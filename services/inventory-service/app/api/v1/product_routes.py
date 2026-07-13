@@ -6,7 +6,12 @@ from shopflow_constants import Permission
 
 from app.core.dependencies import ProductServiceDep
 from app.core.security import BusinessContext, Principal, require_permission
-from app.schemas.product import CreateProductRequest, ProductResponse, UpdateProductRequest
+from app.schemas.product import (
+    BatchProductLookupRequest,
+    CreateProductRequest,
+    ProductResponse,
+    UpdateProductRequest,
+)
 from app.services.product_service import (
     DuplicateBarcodeError,
     DuplicateSKUError,
@@ -50,6 +55,23 @@ async def get_product_by_barcode(
     except ProductNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return ProductResponse.model_validate(product)
+
+
+@router.post("/batch", response_model=list[ProductResponse])
+async def get_products_batch(
+    body: BatchProductLookupRequest,
+    business_id: BusinessContext,
+    product_service: ProductServiceDep,
+    _principal: CanReadInventory,
+) -> list[ProductResponse]:
+    """Used by sales-service to fetch current authoritative prices/names
+    for a whole checkout in one round trip. A POST (not GET) because the
+    list of IDs can exceed a comfortable URL/query-string length — this is
+    a lookup, not a mutation, RBAC-gated the same as any other read."""
+    products = await product_service.get_products_by_ids(
+        business_id=business_id, product_ids=body.product_ids
+    )
+    return [ProductResponse.model_validate(p) for p in products]
 
 
 @router.get("/{product_id}", response_model=ProductResponse)
