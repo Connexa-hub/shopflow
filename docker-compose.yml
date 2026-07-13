@@ -66,5 +66,26 @@ services:
       redis:
         condition: service_healthy
 
+  sales-service:
+    build:
+      context: .
+      dockerfile: services/sales-service/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - services/sales-service/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://shopflow:${POSTGRES_PASSWORD:-devpassword}@postgres:5432/shopflow_sales
+      REDIS_URL: redis://redis:6379/0
+      INVENTORY_SERVICE_URL: http://inventory-service:8000
+    ports:
+      - "8003:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+
 volumes:
   postgres_data:

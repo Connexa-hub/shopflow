@@ -13,3 +13,4 @@
 -- POSTGRES_DB (set via docker-compose environment) creates the first
 -- database automatically; this script creates the rest.
 CREATE DATABASE shopflow_inventory;
+CREATE DATABASE shopflow_sales;

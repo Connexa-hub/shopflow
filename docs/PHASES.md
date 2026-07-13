@@ -5,7 +5,7 @@ Each phase must build, pass tests, and be documented before the next begins.
 - [x] Phase 0 — Monorepo scaffold, shared configuration package
 - [x] Phase 1 — `auth-service`: multi-tenant users, JWT, RBAC, Docker
 - [x] Phase 2 — `packages/database` core + `inventory-service` (catalog + stock ledger)
-- [ ] Phase 3 — `sales-service` (POS transaction engine, receipts)
+- [x] Phase 3 — `sales-service` (POS transaction engine, receipts) + inventory-service batch extensions
 - [ ] Phase 4 — `payment-service` (Paystack/Flutterwave/Monnify adapters)
 - [ ] Phase 5 — `sync-service` (offline-first sync + conflict resolution)
 - [ ] Phase 6 — `merchant-app` mobile skeleton wired to auth-service
@@ -67,9 +67,7 @@ result before issuing that UPDATE, so it's optimistic, not pessimistic —
 under heavy concurrent load two simultaneous sales could both pass the
 check against a stale read. The ledger itself stays internally consistent
 either way (every movement recorded, every `resulting_quantity` accurate);
-only the negative-stock guard has a narrow race window. Flagged as a
-Phase 3+ follow-up once `sales-service` exists and real concurrent load
-patterns are known, rather than guessed at now.
+only the negative-stock guard has a narrow race window.
 
 **Every stock movement is preceded by an ownership check** — see "Bugs
 found and fixed" below.
@@ -109,14 +107,101 @@ Regression tests were added for all three (`TestTenantIsolation` in
 
 ### Operational note: shared JWT secret across services
 
-`auth-service` and `inventory-service` (and every future service) must be
-configured with the **exact same** `JWT_SECRET_KEY`. inventory-service
-verifies tokens locally rather than calling auth-service per-request (see
-Phase 1's auth model), which only works if both services agree on the
-signing secret. In `docker-compose.yml` this means both `.env` files need
-the same value — there's no automatic sync, so a fresh `openssl rand -hex
-32` copy-pasted into only one service's `.env` will produce confusing
-"Invalid or expired token" errors on every cross-service request. Worth a
+`auth-service` and every downstream service (`inventory-service`,
+`sales-service`, and every future one) must be configured with the
+**exact same** `JWT_SECRET_KEY`. Downstream services verify tokens locally
+rather than calling auth-service per-request (see Phase 1's auth model),
+which only works if all services agree on the signing secret. In
+`docker-compose.yml` this means every service's `.env` needs the same
+value — there's no automatic sync, so a fresh `openssl rand -hex 32`
+copy-pasted into only one service's `.env` will produce confusing "Invalid
+or expired token" errors on every cross-service request. Worth a
 shared-secrets-manager approach (e.g. Doppler, or Postgres-stored config)
 before this goes past a handful of services; noted as a Phase 10
 (deployment hardening) follow-up.
+
+## Phase 3 decisions
+
+**First real service-to-service integration.** sales-service never touches
+inventory-service's database — it calls inventory-service's HTTP API,
+forwarding the cashier's own bearer token rather than minting a separate
+service-account credential. inventory-service already gated
+`/stock/batch-sale` behind `SALES_CREATE` and `/stock/batch-return`/`/stock/
+return` behind `SALES_REFUND` specifically for this (a Phase 2 decision
+paying off now) — a cashier's token naturally has the right permissions
+for their own actions, enforced exactly as if they'd called inventory-
+service directly. This stops being sufficient the moment something needs
+to call inventory-service without a live user request in flight (a
+scheduled job, a webhook) — noted in `inventory_client.py` rather than
+silently assumed to generalize.
+
+**inventory-service gained three endpoints this phase**, extending a
+previously-shipped service rather than duplicating its logic:
+- `POST /products/batch` — authoritative current price/name lookup for a
+  whole checkout in one round trip. sales-service NEVER trusts a client-
+  supplied price; it fetches current data fresh and computes totals
+  server-side.
+- `POST /stock/batch-sale` / `POST /stock/batch-return` — atomic multi-item
+  stock deduction/restoration. A multi-item checkout must never partially
+  apply (sell items 1-2, discover item 3 is out of stock, leave 1-2
+  already deducted). Implemented by extracting a no-commit `_apply_movement`
+  core from `record_movement` and committing once at the end of a whole
+  batch — which also fixed a latent bug in `transfer()`, which previously
+  committed each leg independently via two separate `record_movement`
+  calls and was NOT actually atomic across its two legs.
+- `POST /stock/return` — wires up `MovementType.RETURN`, defined in
+  Phase 2's enum but never exposed through any method until voiding a sale
+  needed it.
+
+**Snapshotting.** `SaleItem` stores `sku`, `product_name`, and `unit_price`
+as they were at the moment of sale, not a live reference to inventory-
+service's current product data — a receipt printed a year from now must
+show what was actually sold, even if the product was renamed, repriced, or
+deleted since. Same reasoning e-commerce order-line-items use industry-wide.
+
+**Cross-service failure ordering.** Both `create_sale` and `void_sale` call
+inventory-service (the remote system of record for stock) BEFORE writing
+anything locally. "Sale recorded, stock never deducted" silently corrupts
+a merchant's inventory count in a way that's nearly impossible to detect
+later; "stock deducted, no local sale row" is at least detectable by
+cross-referencing inventory-service's movement `reference_id`s against
+sales-service's sale IDs. Known, stated-plainly limitation: there is no
+true distributed transaction across the two services' separate databases.
+If the remote deduction succeeds but the local DB write then fails,
+`create_sale` makes a best-effort *compensating* call to reverse the
+deduction before re-raising — which can itself fail. Building a reliable
+retry/outbox mechanism is real distributed-systems work that deserves a
+design informed by actual production failure data, not a guess made now;
+a future sync-service/reconciliation job (Phase 5 territory) is the honest
+long-term fix.
+
+**Testability of the cross-service dependency.** `SaleService` depends on
+`InventoryClientProtocol`, not the concrete HTTP client — the same
+Repository Pattern already used for the database, applied to an external
+service dependency. Tests substitute an in-memory `FakeInventoryClient`
+(`tests/fakes.py`) so the business logic — including the compensating-
+reversal-on-local-failure path — is verified without a live
+inventory-service process.
+
+**Known duplication, flagged rather than silently repeated a third time
+without comment.** sales-service's `app/core/security.py` is now the
+*third* copy of the same ~50-line JWT-verification module (auth-service
+issues tokens; inventory-service and sales-service both verify them
+identically). Worth extracting into `packages/auth` — it exists as an
+empty placeholder in the monorepo already — now that three occurrences
+confirm the pattern is stable. Deliberately NOT done as an unplanned
+mid-phase refactor touching two already-shipped, green services; flagged
+here for prioritization instead.
+
+### Bug fixed mid-phase: passlib/bcrypt incompatibility (auth-service)
+
+Not a Phase 3 design decision, but fixed during this phase after a real CI
+failure: `passlib`'s bcrypt backend detects the installed bcrypt version by
+reading `bcrypt.__about__.__version__`, a submodule `bcrypt>=4.0` removed
+entirely. Without it, passlib's internal self-calibration probe
+(`detect_wrap_bug`) crashes against modern bcrypt's deliberate
+`ValueError`-on-overlong-input behavior — before any real password is ever
+touched. passlib hasn't been updated for this in years. Fixed by removing
+passlib and calling `bcrypt` directly in `auth-service/app/core/security.py`
+(hashing/verification behavior is otherwise identical — a drop-in
+replacement from every caller's perspective).
