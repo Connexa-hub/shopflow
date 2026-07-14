@@ -182,17 +182,30 @@ class StockService:
         reason: str | None = None,
         created_by: uuid.UUID | None = None,
     ) -> StockMovement:
-        movement = await self._apply_movement(
-            business_id=business_id,
-            product_id=product_id,
-            location_id=location_id,
-            movement_type=movement_type,
-            quantity_delta=quantity_delta,
-            reference_type=reference_type,
-            reference_id=reference_id,
-            reason=reason,
-            created_by=created_by,
-        )
+        # The common failure (InsufficientStockError) raises inside
+        # _apply_movement before any write happens, so there's usually
+        # nothing to undo — but if this is the first-ever movement for a
+        # product/location pair, create_stock_level() has already flushed
+        # a new row before a LATER, unrelated failure could occur. Same
+        # explicit rollback as the batch/transfer methods, for the same
+        # reason: atomicity shouldn't depend on the caller's session
+        # discipline.
+        try:
+            movement = await self._apply_movement(
+                business_id=business_id,
+                product_id=product_id,
+                location_id=location_id,
+                movement_type=movement_type,
+                quantity_delta=quantity_delta,
+                reference_type=reference_type,
+                reference_id=reference_id,
+                reason=reason,
+                created_by=created_by,
+            )
+        except Exception:
+            await self._stock.rollback()
+            raise
+
         await self._stock.commit()
         return movement
 
@@ -304,11 +317,24 @@ class StockService:
     ) -> tuple[StockMovement, StockMovement]:
         """Moves stock between two branches of the same business. Both legs
         share a `reference_id` (the transfer's own id) so they can be
-        correlated in the ledger later, and now commit together as ONE
-        transaction (fixed on review — the first version committed each
-        leg via record_movement independently, so a failure on the second
-        leg for any reason would have left the source already debited with
-        no matching credit at the destination)."""
+        correlated in the ledger later, and commit together as ONE
+        transaction (fixed on Phase 2 review — the first version committed
+        each leg via record_movement independently, so a failure on the
+        second leg for any reason would have left the source already
+        debited with no matching credit at the destination).
+
+        Explicitly rolls back on failure rather than assuming the caller
+        will discard the session (fixed after a test caught this: the
+        original comment here claimed the uncommitted first leg would
+        "roll back when the session closes" — true only if something
+        actually closes/rolls back the session before it's queried again.
+        A caller that reuses one long-lived session across multiple
+        operations — a Celery worker, or simply two calls in the same test
+        — would otherwise see the first leg's uncommitted change via that
+        same session's own read-your-writes visibility, without it ever
+        being durably persisted. Atomicity should be a property of this
+        method, not an accident of caller session-lifecycle discipline.)
+        """
         if quantity <= 0:
             raise ValueError("Transfer quantity must be positive")
         if from_location_id == to_location_id:
@@ -316,30 +342,31 @@ class StockService:
 
         transfer_id = uuid.uuid4()
 
-        # Using _apply_movement (no commit) for both legs — if the second
-        # leg raises, the first leg's uncommitted change rolls back too
-        # when the session closes without a commit, rather than being left
-        # half-applied.
-        out_movement = await self._apply_movement(
-            business_id=business_id,
-            product_id=product_id,
-            location_id=from_location_id,
-            movement_type=MovementType.TRANSFER_OUT,
-            quantity_delta=-quantity,
-            reference_type="transfer",
-            reference_id=transfer_id,
-            created_by=created_by,
-        )
-        in_movement = await self._apply_movement(
-            business_id=business_id,
-            product_id=product_id,
-            location_id=to_location_id,
-            movement_type=MovementType.TRANSFER_IN,
-            quantity_delta=quantity,
-            reference_type="transfer",
-            reference_id=transfer_id,
-            created_by=created_by,
-        )
+        try:
+            out_movement = await self._apply_movement(
+                business_id=business_id,
+                product_id=product_id,
+                location_id=from_location_id,
+                movement_type=MovementType.TRANSFER_OUT,
+                quantity_delta=-quantity,
+                reference_type="transfer",
+                reference_id=transfer_id,
+                created_by=created_by,
+            )
+            in_movement = await self._apply_movement(
+                business_id=business_id,
+                product_id=product_id,
+                location_id=to_location_id,
+                movement_type=MovementType.TRANSFER_IN,
+                quantity_delta=quantity,
+                reference_type="transfer",
+                reference_id=transfer_id,
+                created_by=created_by,
+            )
+        except Exception:
+            await self._stock.rollback()
+            raise
+
         await self._stock.commit()
         return out_movement, in_movement
 
@@ -385,9 +412,12 @@ class StockService:
         a multi-item checkout must never partially apply (sell items 1-2,
         then discover item 3 is out of stock and leave 1-2 already
         deducted). All items are checked and applied via _apply_movement
-        (no per-item commit); a single commit at the end means a failure
-        on any item rolls back everything that came before it in the same
-        call, since nothing was committed yet. This is what sales-service
+        (no per-item commit), and an explicit rollback runs if any item
+        fails partway through (see transfer()'s docstring for why this is
+        an explicit try/except rather than an assumption that the caller
+        will discard the session — a real bug caught by a test that reused
+        one session across a whole test case, exactly the kind of caller
+        this needs to be robust against). This is what sales-service
         (Phase 3) calls for `POST /stock/batch-sale` — see that route for
         the cross-service contract."""
         if not items:
@@ -395,20 +425,24 @@ class StockService:
 
         batch_reference_id = reference_id or uuid.uuid4()
         movements = []
-        for item in items:
-            if item.quantity <= 0:
-                raise ValueError(f"Quantity must be positive for product {item.product_id}")
-            movement = await self._apply_movement(
-                business_id=business_id,
-                product_id=item.product_id,
-                location_id=item.location_id,
-                movement_type=MovementType.SALE,
-                quantity_delta=-item.quantity,
-                reference_type="sale",
-                reference_id=batch_reference_id,
-                created_by=created_by,
-            )
-            movements.append(movement)
+        try:
+            for item in items:
+                if item.quantity <= 0:
+                    raise ValueError(f"Quantity must be positive for product {item.product_id}")
+                movement = await self._apply_movement(
+                    business_id=business_id,
+                    product_id=item.product_id,
+                    location_id=item.location_id,
+                    movement_type=MovementType.SALE,
+                    quantity_delta=-item.quantity,
+                    reference_type="sale",
+                    reference_id=batch_reference_id,
+                    created_by=created_by,
+                )
+                movements.append(movement)
+        except Exception:
+            await self._stock.rollback()
+            raise
 
         await self._stock.commit()
         return movements
@@ -424,27 +458,32 @@ class StockService:
     ) -> list[StockMovement]:
         """The reverse of record_batch_sale — used when voiding a
         multi-item sale, so every line item's stock is restored as one
-        atomic operation rather than reversed one at a time."""
+        atomic operation rather than reversed one at a time. Same explicit
+        rollback-on-failure as record_batch_sale/transfer."""
         if not items:
             raise ValueError("Batch return requires at least one item")
 
         batch_reference_id = reference_id or uuid.uuid4()
         movements = []
-        for item in items:
-            if item.quantity <= 0:
-                raise ValueError(f"Quantity must be positive for product {item.product_id}")
-            movement = await self._apply_movement(
-                business_id=business_id,
-                product_id=item.product_id,
-                location_id=item.location_id,
-                movement_type=MovementType.RETURN,
-                quantity_delta=item.quantity,
-                reference_type="return",
-                reference_id=batch_reference_id,
-                reason=reason,
-                created_by=created_by,
-            )
-            movements.append(movement)
+        try:
+            for item in items:
+                if item.quantity <= 0:
+                    raise ValueError(f"Quantity must be positive for product {item.product_id}")
+                movement = await self._apply_movement(
+                    business_id=business_id,
+                    product_id=item.product_id,
+                    location_id=item.location_id,
+                    movement_type=MovementType.RETURN,
+                    quantity_delta=item.quantity,
+                    reference_type="return",
+                    reference_id=batch_reference_id,
+                    reason=reason,
+                    created_by=created_by,
+                )
+                movements.append(movement)
+        except Exception:
+            await self._stock.rollback()
+            raise
 
         await self._stock.commit()
         return movements

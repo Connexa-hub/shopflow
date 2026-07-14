@@ -255,9 +255,15 @@ class SaleService:
             return sale
         except Exception:
             # Local persistence failed AFTER the remote deduction already
-            # succeeded — best-effort reversal so stock isn't left
-            # incorrectly deducted. See module docstring for why this is
-            # "best effort", not a guarantee.
+            # succeeded. Two separate cleanups needed here: roll back
+            # whatever partial local writes are sitting uncommitted in
+            # this session (same fix as inventory-service's StockService —
+            # atomicity shouldn't depend on the caller discarding the
+            # session), AND best-effort reverse the remote deduction. The
+            # remote reversal can itself fail (network issue,
+            # inventory-service down) — see module docstring for why
+            # that's "best effort", not a guarantee.
+            await self._sales.rollback()
             try:
                 await self._inventory.batch_return(
                     bearer_token=bearer_token,
@@ -315,6 +321,18 @@ class SaleService:
         sale.status = SaleStatus.VOIDED.value
         sale.voided_at = _utc_now()
         sale.void_reason = reason
-        await self._sales.update(sale)
-        await self._sales.commit()
+        try:
+            await self._sales.update(sale)
+            await self._sales.commit()
+        except Exception:
+            # Same reasoning as create_sale: stock was already restored
+            # remotely above, so a local failure here would leave a
+            # "return" movement in inventory-service's ledger with no
+            # matching voided sale locally. Roll back the local session
+            # explicitly; no remote re-reversal is attempted here since
+            # restoring stock twice would be a worse error than a
+            # detectable mismatch (see docs/PHASES.md's reconciliation
+            # note — the same honest limitation as create_sale).
+            await self._sales.rollback()
+            raise
         return sale

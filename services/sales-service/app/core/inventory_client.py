@@ -27,7 +27,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -184,7 +184,12 @@ class HttpInventoryClient:
             },
         )
 
-    async def _post(self, path: str, *, bearer_token: str, json_body: dict) -> object:
+    async def _post(self, path: str, *, bearer_token: str, json_body: dict) -> Any:
+        # Any, not object: the decoded JSON shape genuinely varies by
+        # endpoint (a list of product dicts for /products/batch; callers
+        # like batch_sale/batch_return don't use the return value at all).
+        # `object` looked more precise but doesn't guarantee __iter__,
+        # which get_products_batch needs — mypy correctly rejected that.
         url = f"{self._base_url}{path}"
         try:
             async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:

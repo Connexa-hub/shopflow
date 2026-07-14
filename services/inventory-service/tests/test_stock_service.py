@@ -547,3 +547,40 @@ class TestTransferAtomicity:
         assert await stock_service.get_current_quantity(
             business_id=business_id, product_id=product.id, location_id=second_location.id
         ) == Decimal("5")
+
+    async def test_transfer_rolls_back_first_leg_when_second_leg_fails(
+        self, stock_service, db_session, business_id, product, location
+    ):
+        """Regression test for the real bug this class's first test didn't
+        actually catch: that test's insufficient-stock scenario fails on
+        the FIRST leg, before any writes happen — it never exercised "leg
+        one succeeds with real uncommitted writes, then leg two fails".
+        This does: leg one (OUT) has enough stock and genuinely applies;
+        leg two (IN) fails because `to_location_id` belongs to a
+        different business. Without an explicit rollback, leg one's
+        uncommitted UPDATE stays visible to this same session even though
+        it was never meant to be permanent — which is exactly the bug a
+        previous version of this method had (see record_batch_sale's
+        near-identical bug, caught by test_batch_sale_is_all_or_nothing)."""
+        other_business_location = Location(business_id=uuid.uuid4(), name="Not Yours")
+        repo = LocationRepository(db_session)
+        invalid_destination = await repo.create(other_business_location)
+        await repo.commit()
+
+        await stock_service.record_restock(
+            business_id=business_id, product_id=product.id, location_id=location.id, quantity=Decimal("20")
+        )
+
+        with pytest.raises(InvalidStockReferenceError):
+            await stock_service.transfer(
+                business_id=business_id,
+                product_id=product.id,
+                from_location_id=location.id,
+                to_location_id=invalid_destination.id,
+                quantity=Decimal("5"),
+            )
+
+        # The OUT leg must be fully rolled back — quantity unchanged.
+        assert await stock_service.get_current_quantity(
+            business_id=business_id, product_id=product.id, location_id=location.id
+        ) == Decimal("20")
