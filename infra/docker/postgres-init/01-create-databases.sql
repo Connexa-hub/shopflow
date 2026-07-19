@@ -14,3 +14,4 @@
 -- database automatically; this script creates the rest.
 CREATE DATABASE shopflow_inventory;
 CREATE DATABASE shopflow_sales;
+CREATE DATABASE shopflow_payment;

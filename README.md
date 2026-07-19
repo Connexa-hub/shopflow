@@ -3,7 +3,7 @@
 Monorepo for a multi-tenant commerce platform serving businesses from single
 provision stores to multi-branch franchises.
 
-## Status: Phase 2 complete — `packages/database` + `inventory-service`
+## Status: Phase 4 complete — `payment-service` (Paystack/Flutterwave/Monnify)
 
 See `docs/PHASES.md` for the full build roadmap, architecture decisions,
 and a documented list of bugs found and fixed during self-review. Notably:

@@ -116,22 +116,32 @@ class TestSale:
     async def test_sale_fails_when_insufficient_stock(
         self, stock_service, business_id, product, location
     ):
+        # IDs captured up front, not re-read from the ORM objects after the
+        # call below — record_sale's internal rollback-on-failure (see
+        # stock_service.py) expires every object in this session's
+        # identity map as a safety measure, and re-accessing product.id
+        # afterward would trigger an implicit reload that async
+        # SQLAlchemy can't perform outside an explicit await. Production
+        # code never hits this: route handlers only ever work with plain
+        # UUIDs from the request body, never a lingering ORM reference.
+        product_id, location_id = product.id, location.id
+
         await stock_service.record_restock(
-            business_id=business_id, product_id=product.id, location_id=location.id, quantity=Decimal("5")
+            business_id=business_id, product_id=product_id, location_id=location_id, quantity=Decimal("5")
         )
 
         with pytest.raises(InsufficientStockError):
             await stock_service.record_sale(
                 business_id=business_id,
-                product_id=product.id,
-                location_id=location.id,
+                product_id=product_id,
+                location_id=location_id,
                 quantity=Decimal("10"),
             )
 
         # Quantity must be UNCHANGED after a rejected sale — this is the
         # core correctness property of the ledger.
         assert await stock_service.get_current_quantity(
-            business_id=business_id, product_id=product.id, location_id=location.id
+            business_id=business_id, product_id=product_id, location_id=location_id
         ) == Decimal("5")
 
     async def test_sale_on_never_stocked_product_fails(
@@ -240,20 +250,25 @@ class TestTransfer:
     async def test_transfer_fails_with_insufficient_source_stock(
         self, stock_service, business_id, product, location, second_location
     ):
+        # See test_sale_fails_when_insufficient_stock for why IDs are
+        # captured up front rather than re-read from product/second_location
+        # after the call below.
+        product_id, location_id, second_location_id = product.id, location.id, second_location.id
+
         await stock_service.record_restock(
-            business_id=business_id, product_id=product.id, location_id=location.id, quantity=Decimal("3")
+            business_id=business_id, product_id=product_id, location_id=location_id, quantity=Decimal("3")
         )
         with pytest.raises(InsufficientStockError):
             await stock_service.transfer(
                 business_id=business_id,
-                product_id=product.id,
-                from_location_id=location.id,
-                to_location_id=second_location.id,
+                product_id=product_id,
+                from_location_id=location_id,
+                to_location_id=second_location_id,
                 quantity=Decimal("10"),
             )
         # Destination must receive nothing if the source leg failed.
         assert await stock_service.get_current_quantity(
-            business_id=business_id, product_id=product.id, location_id=second_location.id
+            business_id=business_id, product_id=product_id, location_id=second_location_id
         ) == Decimal("0")
 
     async def test_transfer_rejects_same_location(
@@ -450,9 +465,13 @@ class TestBatchSale:
             Product(business_id=business_id, sku="B2", name="B2", unit_price=Decimal("1"))
         )
         await repo.commit()
+        # See test_sale_fails_when_insufficient_stock for why IDs are
+        # captured up front rather than re-read from product_a/location
+        # after the batch call below.
+        product_a_id, product_b_id, location_id = product_a.id, product_b.id, location.id
 
         await stock_service.record_restock(
-            business_id=business_id, product_id=product_a.id, location_id=location.id, quantity=Decimal("10")
+            business_id=business_id, product_id=product_a_id, location_id=location_id, quantity=Decimal("10")
         )
         # product_b has ZERO stock — this item will fail the insufficient-stock check.
 
@@ -460,15 +479,15 @@ class TestBatchSale:
             await stock_service.record_batch_sale(
                 business_id=business_id,
                 items=[
-                    BatchStockItem(product_id=product_a.id, location_id=location.id, quantity=Decimal("4")),
-                    BatchStockItem(product_id=product_b.id, location_id=location.id, quantity=Decimal("1")),
+                    BatchStockItem(product_id=product_a_id, location_id=location_id, quantity=Decimal("4")),
+                    BatchStockItem(product_id=product_b_id, location_id=location_id, quantity=Decimal("1")),
                 ],
             )
 
         # product_a's stock must be UNCHANGED — nothing commits until the
         # whole batch succeeds.
         assert await stock_service.get_current_quantity(
-            business_id=business_id, product_id=product_a.id, location_id=location.id
+            business_id=business_id, product_id=product_a_id, location_id=location_id
         ) == Decimal("10")
 
     async def test_batch_sale_rejects_empty_items(self, stock_service, business_id):
@@ -566,21 +585,26 @@ class TestTransferAtomicity:
         repo = LocationRepository(db_session)
         invalid_destination = await repo.create(other_business_location)
         await repo.commit()
+        # See test_sale_fails_when_insufficient_stock for why IDs are
+        # captured up front rather than re-read from product/location
+        # after the call below.
+        product_id, location_id = product.id, location.id
+        invalid_destination_id = invalid_destination.id
 
         await stock_service.record_restock(
-            business_id=business_id, product_id=product.id, location_id=location.id, quantity=Decimal("20")
+            business_id=business_id, product_id=product_id, location_id=location_id, quantity=Decimal("20")
         )
 
         with pytest.raises(InvalidStockReferenceError):
             await stock_service.transfer(
                 business_id=business_id,
-                product_id=product.id,
-                from_location_id=location.id,
-                to_location_id=invalid_destination.id,
+                product_id=product_id,
+                from_location_id=location_id,
+                to_location_id=invalid_destination_id,
                 quantity=Decimal("5"),
             )
 
         # The OUT leg must be fully rolled back — quantity unchanged.
         assert await stock_service.get_current_quantity(
-            business_id=business_id, product_id=product.id, location_id=location.id
+            business_id=business_id, product_id=product_id, location_id=location_id
         ) == Decimal("20")

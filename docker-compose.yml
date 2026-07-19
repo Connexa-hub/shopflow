@@ -87,5 +87,24 @@ services:
       inventory-service:
         condition: service_healthy
 
+  payment-service:
+    build:
+      context: .
+      dockerfile: services/payment-service/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - services/payment-service/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://shopflow:${POSTGRES_PASSWORD:-devpassword}@postgres:5432/shopflow_payment
+      REDIS_URL: redis://redis:6379/0
+      PUBLIC_BASE_URL: http://localhost:8004
+    ports:
+      - "8004:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:

@@ -41,6 +41,13 @@ class Permission(str, Enum):
     EXPENSES_WRITE = "expenses:write"
     REPORTS_READ = "reports:read"
 
+    # Payments (provider-mediated: online checkout links, wallet top-ups,
+    # invoices — see payment-service). Distinct from sales:create/read,
+    # which cover in-person POS payment recording (cash/card/credit) that
+    # never touches a payment provider's API.
+    PAYMENTS_INITIATE = "payments:initiate"
+    PAYMENTS_READ = "payments:read"
+
     # Platform-level (platform_owner only)
     PLATFORM_MANAGE_MERCHANTS = "platform:manage_merchants"
     PLATFORM_MANAGE_FEATURE_FLAGS = "platform:manage_feature_flags"
@@ -65,6 +72,8 @@ DEFAULT_ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.BUSINESS_CONFIGURE,
             Permission.EXPENSES_WRITE,
             Permission.REPORTS_READ,
+            Permission.PAYMENTS_INITIATE,
+            Permission.PAYMENTS_READ,
         }
     ),
     Role.MANAGER: frozenset(
@@ -77,6 +86,8 @@ DEFAULT_ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.STAFF_READ,
             Permission.EXPENSES_WRITE,
             Permission.REPORTS_READ,
+            Permission.PAYMENTS_INITIATE,
+            Permission.PAYMENTS_READ,
         }
     ),
     Role.CASHIER: frozenset(
@@ -84,6 +95,8 @@ DEFAULT_ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.INVENTORY_READ,
             Permission.SALES_CREATE,
             Permission.SALES_READ,
+            Permission.PAYMENTS_INITIATE,
+            Permission.PAYMENTS_READ,
         }
     ),
     Role.STAFF: frozenset(

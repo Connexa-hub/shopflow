@@ -1,0 +1,53 @@
+name: payment-service CI
+
+on:
+  push:
+    paths:
+      - "services/payment-service/**"
+      - "packages/configuration/**"
+      - "packages/constants/**"
+      - "packages/database/**"
+  pull_request:
+    paths:
+      - "services/payment-service/**"
+      - "packages/configuration/**"
+      - "packages/constants/**"
+      - "packages/database/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/payment-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install shared packages
+        run: |
+          pip install -e ../../packages/configuration
+          pip install -e ../../packages/constants
+          pip install -e ../../packages/database
+
+      - name: Install service deps
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Type check
+        run: mypy app --ignore-missing-imports
+
+      - name: Run tests
+        env:
+          SERVICE_NAME: payment-service
+          ENVIRONMENT: test
+          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+          REDIS_URL: "redis://localhost:6379/0"
+          JWT_SECRET_KEY: "ci-test-secret-key-32-bytes-minimum-length"
+          PUBLIC_BASE_URL: "http://localhost:8003"
+        run: pytest -v --tb=short

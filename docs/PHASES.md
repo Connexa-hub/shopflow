@@ -6,7 +6,7 @@ Each phase must build, pass tests, and be documented before the next begins.
 - [x] Phase 1 — `auth-service`: multi-tenant users, JWT, RBAC, Docker
 - [x] Phase 2 — `packages/database` core + `inventory-service` (catalog + stock ledger)
 - [x] Phase 3 — `sales-service` (POS transaction engine, receipts) + inventory-service batch extensions
-- [ ] Phase 4 — `payment-service` (Paystack/Flutterwave/Monnify adapters)
+- [x] Phase 4 — `payment-service` (Paystack/Flutterwave/Monnify adapters)
 - [ ] Phase 5 — `sync-service` (offline-first sync + conflict resolution)
 - [ ] Phase 6 — `merchant-app` mobile skeleton wired to auth-service
 - [ ] Phase 7 — `customer-app`, `admin-app` (platform owner mobile app)
@@ -105,6 +105,54 @@ Regression tests were added for all three (`TestTenantIsolation` in
 `test_inventory_api.py`, `TestCategoryAndSupplierOwnership` in
 `test_product_service.py`) specifically so these can't silently regress.
 
+### Bugs found and fixed after Phase 3 shipped (CI round-trips)
+
+1. **`passlib`/`bcrypt>=4.0` incompatibility** (auth-service). passlib's
+   bcrypt backend reads `bcrypt.__about__.__version__` to detect the
+   installed version — a submodule `bcrypt>=4.0` removed entirely.
+   Without it, passlib's internal self-calibration test crashes before
+   ever touching a real password. passlib is effectively unmaintained;
+   fixed by calling `bcrypt` directly instead of pinning to an older,
+   unverifiable-from-here bcrypt version.
+
+2. **Cross-service atomicity was contingent on caller session discipline,
+   not a property of the method itself** (inventory-service +
+   sales-service). `record_batch_sale`/`record_batch_return`/`transfer`/
+   `record_movement` only committed once at the end, but never explicitly
+   rolled back on failure — relying on the caller to discard the session.
+   That's true for a real FastAPI request (fresh session per request,
+   discarded on any unhandled exception) but not guaranteed for any other
+   caller (a Celery worker reusing a session, or simply a test that shares
+   one session across a whole test case — which is exactly how this was
+   caught). Fixed by explicit `try/except: rollback(); raise` in all four
+   methods, and the equivalent local-persistence-failure branches in
+   sales-service's `create_sale`/`void_sale`.
+
+3. **That same rollback fix exposed a real SQLAlchemy async gotcha in the
+   test suite itself**: `Session.rollback()` unconditionally expires
+   every object in the session's identity map (a safety measure — after a
+   rollback, previously-loaded attribute values may no longer be valid).
+   Four tests that reuse a fixture ORM object's `.id` attribute *after* a
+   call that triggers this rollback hit `MissingGreenlet`, because async
+   SQLAlchemy can't silently perform the resulting implicit reload outside
+   an explicit `await`. This is a test-design issue, not a production bug
+   — real route handlers only ever work with plain UUIDs parsed from the
+   request body, never a lingering ORM object reference, so they never
+   hit this. Fixed by capturing `.id` values as plain variables before any
+   risky call in the four affected tests, which is also just better test
+   hygiene independent of this specific bug. Traced every `pytest.raises`
+   block in the file against this pattern before concluding these four
+   were the only ones affected.
+
+4. **`sales-service`'s `create_sale`/`void_sale` rollback branches are
+   currently untested**, flagged honestly rather than left silent: both
+   only run when a *local* DB write fails after the *remote* inventory
+   call already succeeded, and the current test suite's fault injection
+   (`FakeInventoryClient.fail_batch_sale_with` etc.) only targets the
+   remote side. Forcing a clean local-DB-failure scenario needs fault
+   injection at the repository layer, which doesn't exist yet — worth
+   building before this code path is trusted in production, not before.
+
 ### Operational note: shared JWT secret across services
 
 `auth-service` and every downstream service (`inventory-service`,
@@ -195,13 +243,96 @@ here for prioritization instead.
 
 ### Bug fixed mid-phase: passlib/bcrypt incompatibility (auth-service)
 
-Not a Phase 3 design decision, but fixed during this phase after a real CI
-failure: `passlib`'s bcrypt backend detects the installed bcrypt version by
-reading `bcrypt.__about__.__version__`, a submodule `bcrypt>=4.0` removed
-entirely. Without it, passlib's internal self-calibration probe
-(`detect_wrap_bug`) crashes against modern bcrypt's deliberate
-`ValueError`-on-overlong-input behavior — before any real password is ever
-touched. passlib hasn't been updated for this in years. Fixed by removing
-passlib and calling `bcrypt` directly in `auth-service/app/core/security.py`
-(hashing/verification behavior is otherwise identical — a drop-in
-replacement from every caller's perspective).
+See item 1 under "Bugs found and fixed after Phase 3 shipped" above — not
+a Phase 3 design decision, but fixed during this phase after a real CI
+failure. Hashing/verification behavior is otherwise identical from every
+caller's perspective; the fix only changed what happens underneath
+`hash_password`/`verify_password`.
+
+## Phase 3 fix: MissingGreenlet in inventory-service's test suite
+
+Documented separately from the rest because it's a genuinely interesting
+async SQLAlchemy gotcha, not a design decision: the same commit that fixed
+the rollback-on-failure gap above caused four tests to fail with
+`sqlalchemy.exc.MissingGreenlet`. `Session.rollback()` unconditionally
+expires every object in the session's identity map (a safety measure —
+after a rollback, previously-loaded attribute values may no longer be
+valid). Tests that reuse a fixture ORM object's `.id` attribute *after* a
+call that triggers this rollback hit the error, because async SQLAlchemy
+can't silently perform the resulting implicit reload outside an explicit
+`await`. Not a production bug — real route handlers only ever work with
+plain UUIDs parsed from the request body, never a lingering ORM reference.
+Fixed by capturing `.id` values as plain variables before any risky call
+in the four affected tests. Every `pytest.raises` block in the file was
+traced against this pattern before concluding these four were the only
+ones at risk.
+
+## Phase 4 decisions
+
+**Adapter pattern, verified against current docs, not solely training
+data.** Payment provider API details — endpoint paths, field names,
+webhook signature schemes — are exactly the kind of thing that drifts, and
+getting one wrong silently mishandles real money. Before writing
+`app/providers/{paystack,flutterwave,monnify}.py`, each provider's current
+documentation was searched and (for the two most load-bearing details —
+Flutterwave's webhook signature scheme and Monnify's endpoint paths)
+fetched directly, rather than trusting recollection. Two genuine
+uncertainties surfaced and are flagged in code comments rather than
+asserted with false confidence:
+- Flutterwave's **own current docs page** is internally inconsistent — the
+  prose describes HMAC-SHA256 verification, but the runnable code examples
+  further down the same page do a plain string comparison with no HMAC at
+  all. Implemented the HMAC approach (the more secure, explicitly-described
+  mechanism) but this should be confirmed against a real dashboard + live
+  test webhook before trusting it in production.
+- Monnify's exact webhook HMAC algorithm and its transaction-status
+  endpoint's exact reference parameter (their `transactionReference` vs.
+  our `paymentReference`) couldn't be confirmed with full certainty during
+  research. Implemented with the most likely answer (matching Paystack's
+  pattern) but flagged for verification before going live.
+
+**payment-service is for *provider-mediated* payments only** — online
+checkout links, wallet top-ups, invoice payments — a different concern
+from sales-service's `SalePayment.method` (cash/card/credit recorded
+directly at the POS, settled via physical hardware, no provider API
+involved). A sale paid for online would use `purpose=SALE_PAYMENT` with
+`related_sale_id` set, linking the two records without either service
+reaching into the other's database.
+
+**Idempotent webhook handling**, not just "check the transaction's current
+status": every provider explicitly retries on non-200 responses, and
+Flutterwave's own docs warn a single legitimate event can be delivered
+more than once. `WebhookEvent` rows are keyed by `(provider,
+provider_event_key)` and checked *before* any processing — a retried or
+duplicate delivery is recognized and acknowledged with 200 without
+re-running anything, rather than relying solely on `PaymentTransaction`'s
+status already being terminal (which would still work for "already
+succeeded," but wouldn't distinguish a legitimate duplicate from a
+malformed retry worth investigating).
+
+**Rollback-on-failure applied from the start**, not rediscovered a third
+time: every write-then-commit method explicitly rolls back on an
+unhandled exception, following the pattern already fixed in
+inventory-service and sales-service this same day.
+
+**Fourth identical copy of the JWT-verification module.** Three
+occurrences was flagged as worth extracting into `packages/auth`; four
+is past the point where deferring further is reasonable. This should be
+the first thing done at the start of Phase 5, before a fifth copy exists.
+
+**Two bugs found via my own test-writing, not a reported CI failure**:
+`webhook_routes.py` didn't catch `PaymentValidationError` at all (an
+unconfigured provider named in the webhook URL would have crashed with a
+raw 500 instead of a clean 400) — caught while writing the "unconfigured
+provider" test, before it ever reached CI. The same gap existed in the
+`/verify` route for the same reason (a provider disabled after a
+transaction was created against it). Both fixed before this phase shipped.
+
+**Known gap, flagged rather than silently left untested**:
+`initialize_payment`'s failure-after-provider-success path (the provider
+transaction now exists with no local record) has no automated test, for
+the same reason sales-service's equivalent gap doesn't — forcing a clean
+local-DB-failure scenario needs fault injection at the repository layer
+that doesn't exist yet. A reconciliation job comparing each provider's
+recent transactions against local records is the honest long-term fix,
+and is Phase 5+ territory once sync-service exists.
