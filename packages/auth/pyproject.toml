@@ -1,0 +1,17 @@
+[project]
+name = "shopflow-auth"
+version = "0.1.0"
+description = "Shared JWT verification and RBAC dependency factories for ShopFlow services"
+requires-python = ">=3.11"
+dependencies = [
+    "shopflow-constants",
+    "fastapi>=0.110",
+    "python-jose[cryptography]>=3.3",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["shopflow_auth*"]

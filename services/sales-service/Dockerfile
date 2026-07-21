@@ -14,7 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY packages/configuration /packages/configuration
 COPY packages/constants /packages/constants
 COPY packages/database /packages/database
-RUN pip install /packages/configuration /packages/constants /packages/database
+COPY packages/auth /packages/auth
+RUN pip install /packages/configuration /packages/constants /packages/database /packages/auth
 
 COPY services/sales-service/pyproject.toml ./
 RUN pip install ".[dev]" || pip install .

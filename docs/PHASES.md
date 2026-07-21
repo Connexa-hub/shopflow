@@ -336,3 +336,42 @@ local-DB-failure scenario needs fault injection at the repository layer
 that doesn't exist yet. A reconciliation job comparing each provider's
 recent transactions against local records is the honest long-term fix,
 and is Phase 5+ territory once sync-service exists.
+
+## `packages/auth` extraction (between Phase 4 and Phase 5)
+
+Extracted the JWT-verification/RBAC module that had accumulated three
+near-identical copies (inventory-service, sales-service, payment-service —
+auth-service is structurally different, since it issues tokens rather
+than verifying them, and keeps its own security.py for hashing/issuance).
+
+**Factories, not a shared settings instance.** Every service has its own
+`Settings` class and `get_settings()` — there's no single shared config
+object to import. `packages/auth` exports `create_principal_dependency(get_settings)`,
+`create_permission_checker(...)`, and `create_business_context_dependency(...)`;
+each service calls these once at import time with its own `get_settings`,
+binding the shared logic to its own JWT secret/algorithm. Same reasoning
+as `packages/database`'s `create_base()` factory for the same underlying
+issue — no shared state that would let one service's config leak into
+another's.
+
+**Every existing route file was left untouched.** Each service's own
+`app/core/security.py` became a thin wiring file re-exporting the exact
+same names (`Principal`, `BusinessContext`, `require_permission`, and
+`CurrentPrincipal` for sales-service specifically) that route files
+already imported — checked via a repo-wide grep for every
+`from app.core.security import ...` line before writing a single line of
+the new package, specifically so this refactor wouldn't need to touch
+route files at all.
+
+**`Principal.raw_token`** is now populated uniformly for every service
+(not conditionally), even though only sales-service actually uses it
+(forwarding a cashier's token to inventory-service). Simpler than making
+it conditional per-service, and harmless for services that never read it.
+
+Verified via real editable-installs across all 8 packages/services after
+the migration, plus an isolated exec-based test of the actual
+`Principal.has_permission()` logic (extracting just that class from the
+file and running it directly, since `fastapi`/`jose` can't be installed
+in this sandbox) rather than only a syntax check — the full JWT decode
+path through `jose` itself still needs a real CI run to confirm, same
+limitation as everything else built in this sandbox.

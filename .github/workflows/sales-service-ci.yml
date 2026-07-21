@@ -7,12 +7,14 @@ on:
       - "packages/configuration/**"
       - "packages/constants/**"
       - "packages/database/**"
+      - "packages/auth/**"
   pull_request:
     paths:
       - "services/sales-service/**"
       - "packages/configuration/**"
       - "packages/constants/**"
       - "packages/database/**"
+      - "packages/auth/**"
 
 jobs:
   test:
@@ -32,6 +34,7 @@ jobs:
           pip install -e ../../packages/configuration
           pip install -e ../../packages/constants
           pip install -e ../../packages/database
+          pip install -e ../../packages/auth
 
       - name: Install service deps
         run: pip install -e ".[dev]"
